@@ -16,6 +16,19 @@ from gigachat import GigaChat
 
 load_dotenv()
 
+# ─────────────────────────────────────────────────────────────
+# Универсальное чтение секретов: st.secrets → os.getenv
+# ─────────────────────────────────────────────────────────────
+def get_secret(key: str, default: str = ""):
+    """Читает сначала из st.secrets (облако), потом из .env (локально)."""
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
 DB_PATH = "advisor.db"
 
 CATEGORIES = {
@@ -341,13 +354,8 @@ def _norm(s: str) -> str:
     return s
 
 
-# ─── Кинопоиск ───────────────────────────────────────────────
 def verify_title_kinopoisk(title: str, media_type: str):
-    """
-    Ищет тайтл в Кинопоиске.
-    Возвращает (description, year) или (None, None).
-    """
-    api_key = os.getenv("KINOPOISK_API_KEY")
+    api_key = get_secret("KINOPOISK_API_KEY")
     if not api_key:
         return None, None
 
@@ -355,10 +363,7 @@ def verify_title_kinopoisk(title: str, media_type: str):
         "X-API-KEY": api_key,
         "Content-Type": "application/json",
     }
-    params = {
-        "keyword": title,
-        "page": 1,
-    }
+    params = {"keyword": title, "page": 1}
 
     try:
         r = requests.get(KINOPOISK_API, headers=headers, params=params, timeout=5)
@@ -370,7 +375,6 @@ def verify_title_kinopoisk(title: str, media_type: str):
         if not films:
             return None, None
 
-        # Ищем наиболее подходящий результат по названию
         title_norm = _norm(title)
         chosen = None
         for film in films:
@@ -382,11 +386,9 @@ def verify_title_kinopoisk(title: str, media_type: str):
         if chosen is None:
             chosen = films[0]
 
-        # Извлекаем описание и год
         description = chosen.get("description") or None
         year = chosen.get("year")
 
-        # Если описания нет — идём за деталями
         if not description:
             film_id = chosen.get("filmId")
             if film_id:
@@ -401,7 +403,6 @@ def verify_title_kinopoisk(title: str, media_type: str):
                     pass
 
         if not description:
-            # Если нет описания — вернём заглушку с годом, чтобы считать тайтл подтверждённым
             if year:
                 return f"Год выпуска: {year}.", str(year)
             return None, None
@@ -412,25 +413,19 @@ def verify_title_kinopoisk(title: str, media_type: str):
         return None, None
 
 
-# ─── Wikipedia (fallback) ────────────────────────────────────
 def _titles_match(requested: str, article_title: str, extract: str = "") -> bool:
     req = _norm(requested)
     art = _norm(article_title)
-
     if not req:
         return False
-
     if req == art or req in art or art in req:
         return True
-
     req_words = set(req.split()) - STOP_WORDS
     if not req_words:
         return True
-
     pool = set(art.split())
     if extract:
         pool |= set(_norm(extract[:400]).split())
-
     matches = req_words & pool
     return len(matches) >= len(req_words) * 0.7
 
@@ -489,7 +484,6 @@ def _get_wiki_extract(page_title: str):
 
 def _try_direct_title(title: str, media_type: str):
     headers = {"User-Agent": USER_AGENT}
-
     if media_type == "anime":
         variants = [title, f"{title} (аниме)", f"{title} (аниме-сериал)"]
     elif media_type == "series":
@@ -539,7 +533,6 @@ def _try_direct_title(title: str, media_type: str):
 
 def verify_title_wikipedia(title: str, media_type: str):
     clean = _clean_title(title)
-
     extract = _try_direct_title(clean, media_type)
     if extract:
         sentences = extract.split(". ")
@@ -557,7 +550,6 @@ def verify_title_wikipedia(title: str, media_type: str):
         queries = [f"{clean} аниме", clean]
 
     seen_pages = set()
-
     for query in queries:
         results = _search_wiki(query, limit=5)
         for page_title in results:
@@ -577,7 +569,6 @@ def verify_title_wikipedia(title: str, media_type: str):
                 continue
             if is_disambiguation(extract):
                 continue
-
             if not _titles_match(clean, page_title, extract):
                 continue
 
@@ -590,7 +581,6 @@ def verify_title_wikipedia(title: str, media_type: str):
             has_book = any(m in lower for m in ["роман ", "книга ", "повесть ", "сборник "])
             has_game = any(m in lower for m in ["видеоигр", "компьютерн", "игра для"])
             has_film = any(m in lower for m in ["фильм", "сериал", "телесериал", "аниме", "мультфильм", "режиссёр", "режиссер"])
-
             if (has_book or has_game) and not has_film:
                 continue
 
@@ -604,16 +594,10 @@ def verify_title_wikipedia(title: str, media_type: str):
     return None, None
 
 
-# ─── Общая верификация: Кинопоиск → Wikipedia ────────────────
 def verify_title(title: str, media_type: str):
-    """
-    Сначала пробуем Кинопоиск (русские названия + описания),
-    если не вышло — идём в Википедию.
-    """
     desc, year = verify_title_kinopoisk(title, media_type)
     if desc:
         return desc, year
-
     return verify_title_wikipedia(title, media_type)
 
 
@@ -661,9 +645,9 @@ def clear_cache():
 
 
 def test_kinopoisk_api():
-    api_key = os.getenv("KINOPOISK_API_KEY")
+    api_key = get_secret("KINOPOISK_API_KEY")
     if not api_key:
-        return False, "❌ KINOPOISK_API_KEY не задан в .env"
+        return False, "❌ KINOPOISK_API_KEY не задан"
     try:
         r = requests.get(
             KINOPOISK_API,
@@ -724,12 +708,10 @@ def is_title_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped or len(stripped) > 200:
         return False
-
     bad_starts = ["почему", "обоснование", "жанр:", "пояснение",
                   "итак", "вот", "например", "кстати", "наконец"]
     if any(stripped.lower().startswith(b) for b in bad_starts):
         return False
-
     for pat in TITLE_PATTERNS:
         if re.match(pat, stripped):
             if re.search(r'\(\s*\d{4}', stripped) or \
@@ -748,14 +730,12 @@ def extract_title_from_block(block: str):
             raw = raw.strip('*').strip()
             title_clean = re.sub(r'\s*\([^)]*\)\s*$', '', raw).strip()
             lower = first_line.lower()
-
             if "аниме" in lower:
                 media_type = "anime"
             elif "сериал" in lower or "series" in lower:
                 media_type = "series"
             else:
                 media_type = "movie"
-
             if not title_clean or len(title_clean) < 2:
                 continue
             return title_clean, media_type
@@ -783,9 +763,9 @@ def split_into_blocks(text: str):
 # ─────────────────────────────────────────────────────────────
 def get_gigachat_recommendations(user_ratings_text: str, rated_titles: set,
                                  extra_prompt: str = "") -> str:
-    credentials = os.getenv("GIGACHAT_CREDENTIALS")
+    credentials = get_secret("GIGACHAT_CREDENTIALS")
     if not credentials:
-        return "❌ Ключ GIGACHAT_CREDENTIALS не найден в файле .env"
+        return "❌ Ключ GIGACHAT_CREDENTIALS не найден (ни в st.secrets, ни в .env)"
 
     rated_list = "\n".join(f"- {t[0]} ({media_label(t[1])})" for t in rated_titles)
 
@@ -978,12 +958,10 @@ init_db()
 st.title("🎬 Что посмотреть")
 st.caption("Персональный советчик: оцени тайтлы и получи рекомендации от GigaChat.")
 
-# Проверка ключа Кинопоиска
-if not os.getenv("KINOPOISK_API_KEY"):
+if not get_secret("KINOPOISK_API_KEY"):
     st.warning(
-        "⚠️ Ключ `KINOPOISK_API_KEY` не найден в `.env`. "
-        "Верификация будет работать только через Википедию — многие аниме и редкие тайтлы могут не находиться. "
-        "Получите бесплатный ключ на kinopoiskapiunofficial.tech и добавьте в `.env`."
+        "⚠️ Ключ `KINOPOISK_API_KEY` не найден. "
+        "Верификация пойдёт только через Википедию — многие аниме могут не находиться."
     )
 
 tab_rate, tab_plan, tab_my, tab_ai, tab_settings = st.tabs(
@@ -1220,10 +1198,7 @@ with tab_settings:
 
     st.markdown("---")
     st.markdown("### Кэш описаний")
-    st.write(
-        "**Важно:** после обновления кода очистите кэш — теперь описания "
-        "берутся из Кинопоиска, а не из Википедии."
-    )
+    st.write("Очистить кэш описаний.")
     if st.button("🧹 Очистить кэш описаний"):
         clear_cache()
         st.success("Кэш описаний очищен.")
