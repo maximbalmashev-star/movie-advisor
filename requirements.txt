@@ -2,3 +2,4 @@ streamlit
 gigachat
 python-dotenv
 requests
+supabase
