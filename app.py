@@ -3,7 +3,6 @@ import io
 import os
 import re
 import random
-import sqlite3
 import requests
 from datetime import datetime
 
@@ -13,14 +12,15 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 import streamlit as st
 from dotenv import load_dotenv
 from gigachat import GigaChat
+from supabase import create_client, Client
 
 load_dotenv()
+
 
 # ─────────────────────────────────────────────────────────────
 # Универсальное чтение секретов: st.secrets → os.getenv
 # ─────────────────────────────────────────────────────────────
 def get_secret(key: str, default: str = ""):
-    """Читает сначала из st.secrets (облако), потом из .env (локально)."""
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -29,7 +29,24 @@ def get_secret(key: str, default: str = ""):
     return os.getenv(key, default)
 
 
-DB_PATH = "advisor.db"
+# ─────────────────────────────────────────────────────────────
+# Подключение к Supabase
+# ─────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def get_supabase() -> Client:
+    url = get_secret("SUPABASE_URL")
+    key = get_secret("SUPABASE_KEY")
+    if not url or not key:
+        st.error(
+            "❌ SUPABASE_URL или SUPABASE_KEY не заданы. "
+            "Проверьте .env (локально) или Secrets (в Streamlit Cloud)."
+        )
+        st.stop()
+    return create_client(url, key)
+
+
+supabase = get_supabase()
+
 
 CATEGORIES = {
     "Шедевр 🌟": "masterpiece",
@@ -166,7 +183,7 @@ ANIME = [
     "Созданный в Бездне", "Обещанный Неверленд",
     "Клинок Бессмертного", "Бродяга Кэнсин",
     "Самурай Чамплу", "Скиталец Кэнсин", "Бэттерфлай",
-    "Мобильный воин Гандам", "Макросс", "Евангелион 2.0",
+    "Мобильный воин Гандам", "Макрос", "Евангелион 2.0",
     "Полный металл паника", "Код: Брейкер",
     "Хвост Феи", "Соул Итер", "Доктор Стоун",
     "Магическая битва 0", "Дзюдзюцу Кайсен",
@@ -192,103 +209,65 @@ def media_label(media_type):
 
 
 # ─────────────────────────────────────────────────────────────
-# База данных
+# Работа с Supabase
 # ─────────────────────────────────────────────────────────────
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS ratings (
-            title TEXT NOT NULL,
-            media_type TEXT NOT NULL,
-            category TEXT NOT NULL,
-            rated_at TEXT NOT NULL,
-            PRIMARY KEY (title, media_type)
-        )
-    """)
-
-    c.execute("PRAGMA table_info(media_cache)")
-    columns = [row[1] for row in c.fetchall()]
-    if columns:
-        if "poster_url" in columns:
-            c.execute("DROP TABLE media_cache")
-            columns = []
-        elif "year" not in columns:
-            c.execute("ALTER TABLE media_cache ADD COLUMN year TEXT")
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS media_cache (
-            title TEXT NOT NULL,
-            media_type TEXT NOT NULL,
-            description TEXT,
-            year TEXT,
-            cached_at TEXT NOT NULL,
-            PRIMARY KEY (title, media_type)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
 def save_rating(title, media_type, category):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO ratings (title, media_type, category, rated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(title, media_type) DO UPDATE SET
-            category = excluded.category,
-            rated_at = excluded.rated_at
-    """, (title, media_type, category, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        supabase.table("ratings").upsert({
+            "title": title,
+            "media_type": media_type,
+            "category": category,
+            "rated_at": datetime.now().isoformat(),
+        }, on_conflict="title,media_type").execute()
+    except Exception as e:
+        st.error(f"Ошибка сохранения оценки: {e}")
 
 
 def delete_rating(title, media_type):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM ratings WHERE title = ? AND media_type = ?", (title, media_type))
-    conn.commit()
-    conn.close()
+    try:
+        supabase.table("ratings").delete().eq("title", title).eq("media_type", media_type).execute()
+    except Exception as e:
+        st.error(f"Ошибка удаления: {e}")
 
 
 def get_all_ratings():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT title, media_type, category, rated_at FROM ratings ORDER BY rated_at DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    """Возвращает список кортежей (title, media_type, category, rated_at)."""
+    try:
+        resp = supabase.table("ratings").select("title,media_type,category,rated_at").order(
+            "rated_at", desc=True
+        ).execute()
+        return [(r["title"], r["media_type"], r["category"], r["rated_at"]) for r in resp.data]
+    except Exception:
+        return []
 
 
 def get_rated_titles():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT title, media_type FROM ratings")
-    rows = c.fetchall()
-    conn.close()
-    return set(rows)
+    """Возвращает множество (title, media_type) — для быстрой проверки."""
+    try:
+        resp = supabase.table("ratings").select("title,media_type").execute()
+        return {(r["title"], r["media_type"]) for r in resp.data}
+    except Exception:
+        return set()
 
 
 def reset_all_ratings():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM ratings")
-    conn.commit()
-    conn.close()
+    try:
+        # Сначала получаем все id
+        resp = supabase.table("ratings").select("id").execute()
+        ids = [r["id"] for r in resp.data]
+        if ids:
+            supabase.table("ratings").delete().in_("id", ids).execute()
+    except Exception as e:
+        st.error(f"Ошибка сброса: {e}")
 
 
 def is_cached(title, media_type):
+    """True если запись уже есть в media_cache (даже без описания)."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "SELECT 1 FROM media_cache WHERE title = ? AND media_type = ?",
-            (title, media_type),
-        )
-        row = c.fetchone()
-        conn.close()
-        return row is not None
+        resp = supabase.table("media_cache").select("id").eq("title", title).eq(
+            "media_type", media_type
+        ).execute()
+        return len(resp.data) > 0
     except Exception:
         return False
 
@@ -359,10 +338,7 @@ def verify_title_kinopoisk(title: str, media_type: str):
     if not api_key:
         return None, None
 
-    headers = {
-        "X-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     params = {"keyword": title, "page": 1}
 
     try:
@@ -603,32 +579,29 @@ def verify_title(title: str, media_type: str):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_description(title: str, media_type: str):
+    # 1. Проверяем кэш в Supabase
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "SELECT description, year FROM media_cache WHERE title = ? AND media_type = ?",
-            (title, media_type),
-        )
-        row = c.fetchone()
-        conn.close()
-        if row is not None:
-            return row[0], row[1]
+        resp = supabase.table("media_cache").select("description,year").eq(
+            "title", title
+        ).eq("media_type", media_type).execute()
+        if resp.data:
+            row = resp.data[0]
+            return row.get("description"), row.get("year")
     except Exception:
         pass
 
+    # 2. Верификация через Кинопоиск / Wikipedia
     desc, year = verify_title(title, media_type)
 
+    # 3. Сохраняем в Supabase (включая NULL — чтобы не пробовать снова)
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            INSERT OR REPLACE INTO media_cache
-                (title, media_type, description, year, cached_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (title, media_type, desc, year, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
+        supabase.table("media_cache").upsert({
+            "title": title,
+            "media_type": media_type,
+            "description": desc,
+            "year": year,
+            "cached_at": datetime.now().isoformat(),
+        }, on_conflict="title,media_type").execute()
     except Exception:
         pass
 
@@ -636,12 +609,14 @@ def get_description(title: str, media_type: str):
 
 
 def clear_cache():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM media_cache")
-    conn.commit()
-    conn.close()
-    get_description.clear()
+    try:
+        resp = supabase.table("media_cache").select("id").execute()
+        ids = [r["id"] for r in resp.data]
+        if ids:
+            supabase.table("media_cache").delete().in_("id", ids).execute()
+        get_description.clear()
+    except Exception as e:
+        st.error(f"Ошибка очистки кэша: {e}")
 
 
 def test_kinopoisk_api():
@@ -686,6 +661,14 @@ def test_wikipedia_api():
             return False, f"❌ HTTP {r.status_code}"
     except Exception as e:
         return False, f"❌ Ошибка сети: {e}"
+
+
+def test_supabase():
+    try:
+        resp = supabase.table("ratings").select("id").limit(1).execute()
+        return True, f"✅ Supabase работает. Записей в ratings: {len(resp.data)} (видна первая)"
+    except Exception as e:
+        return False, f"❌ Ошибка Supabase: {e}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -765,7 +748,7 @@ def get_gigachat_recommendations(user_ratings_text: str, rated_titles: set,
                                  extra_prompt: str = "") -> str:
     credentials = get_secret("GIGACHAT_CREDENTIALS")
     if not credentials:
-        return "❌ Ключ GIGACHAT_CREDENTIALS не найден (ни в st.secrets, ни в .env)"
+        return "❌ Ключ GIGACHAT_CREDENTIALS не найден"
 
     rated_list = "\n".join(f"- {t[0]} ({media_label(t[1])})" for t in rated_titles)
 
@@ -953,7 +936,6 @@ def _do_generate_recommendations(extra_prompt: str = ""):
 # Интерфейс
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Что посмотреть", page_icon="🎬", layout="wide")
-init_db()
 
 st.title("🎬 Что посмотреть")
 st.caption("Персональный советчик: оцени тайтлы и получи рекомендации от GigaChat.")
@@ -961,7 +943,7 @@ st.caption("Персональный советчик: оцени тайтлы �
 if not get_secret("KINOPOISK_API_KEY"):
     st.warning(
         "⚠️ Ключ `KINOPOISK_API_KEY` не найден. "
-        "Верификация пойдёт только через Википедию — многие аниме могут не находиться."
+        "Верификация пойдёт только через Википедию."
     )
 
 tab_rate, tab_plan, tab_my, tab_ai, tab_settings = st.tabs(
@@ -1167,16 +1149,23 @@ with tab_settings:
     st.subheader("⚙️ Настройки")
 
     st.markdown("### Диагностика источников")
-    st.caption("Проверить доступность Кинопоиска и Википедии.")
-    col1, col2 = st.columns(2)
+    st.caption("Проверить доступность Supabase, Кинопоиска и Википедии.")
+    col1, col2, col3 = st.columns(3)
     with col1:
+        if st.button("🗄️ Проверить Supabase"):
+            ok, msg = test_supabase()
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+    with col2:
         if st.button("🔍 Проверить Кинопоиск"):
             ok, msg = test_kinopoisk_api()
             if ok:
                 st.success(msg)
             else:
                 st.error(msg)
-    with col2:
+    with col3:
         if st.button("🔍 Проверить Wikipedia"):
             ok, msg = test_wikipedia_api()
             if ok:
