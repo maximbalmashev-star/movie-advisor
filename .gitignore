@@ -1,0 +1,5 @@
+.env
+advisor.db
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
