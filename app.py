@@ -37,12 +37,11 @@ def get_supabase() -> Client:
     url = get_secret("SUPABASE_URL")
     key = get_secret("SUPABASE_KEY")
     if not url or not key:
-        st.error(
-            "❌ SUPABASE_URL или SUPABASE_KEY не заданы. "
-            "Проверьте .env (локально) или Secrets (в Streamlit Cloud)."
-        )
-        st.stop()
-    return create_client(url, key)
+        return None
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
 
 
 supabase = get_supabase()
@@ -212,7 +211,9 @@ def media_label(media_type):
 # Работа с Supabase
 # ─────────────────────────────────────────────────────────────
 def save_rating(title, media_type, category):
-    """Возвращает True при успехе, False при ошибке. Ошибку показывает в UI."""
+    if supabase is None:
+        st.error("❌ Supabase не подключён. Проверьте секреты.")
+        return False
     try:
         supabase.table("ratings").upsert({
             "title": title,
@@ -227,6 +228,8 @@ def save_rating(title, media_type, category):
 
 
 def delete_rating(title, media_type):
+    if supabase is None:
+        return False
     try:
         supabase.table("ratings").delete().eq("title", title).eq("media_type", media_type).execute()
         return True
@@ -236,6 +239,8 @@ def delete_rating(title, media_type):
 
 
 def get_all_ratings():
+    if supabase is None:
+        return []
     try:
         resp = supabase.table("ratings").select("title,media_type,category,rated_at").order(
             "rated_at", desc=True
@@ -246,6 +251,8 @@ def get_all_ratings():
 
 
 def get_rated_titles():
+    if supabase is None:
+        return set()
     try:
         resp = supabase.table("ratings").select("title,media_type").execute()
         return {(r["title"], r["media_type"]) for r in resp.data}
@@ -254,6 +261,8 @@ def get_rated_titles():
 
 
 def reset_all_ratings():
+    if supabase is None:
+        return False
     try:
         resp = supabase.table("ratings").select("id").execute()
         ids = [r["id"] for r in resp.data]
@@ -266,6 +275,8 @@ def reset_all_ratings():
 
 
 def is_cached(title, media_type):
+    if supabase is None:
+        return False
     try:
         resp = supabase.table("media_cache").select("id").eq("title", title).eq(
             "media_type", media_type
@@ -582,33 +593,40 @@ def verify_title(title: str, media_type: str):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_description(title: str, media_type: str):
-    try:
-        resp = supabase.table("media_cache").select("description,year").eq(
-            "title", title
-        ).eq("media_type", media_type).execute()
-        if resp.data:
-            row = resp.data[0]
-            return row.get("description"), row.get("year")
-    except Exception:
-        pass
+    # 1. Проверяем кэш в Supabase
+    if supabase is not None:
+        try:
+            resp = supabase.table("media_cache").select("description,year").eq(
+                "title", title
+            ).eq("media_type", media_type).execute()
+            if resp.data:
+                row = resp.data[0]
+                return row.get("description"), row.get("year")
+        except Exception:
+            pass
 
+    # 2. Верификация
     desc, year = verify_title(title, media_type)
 
-    try:
-        supabase.table("media_cache").upsert({
-            "title": title,
-            "media_type": media_type,
-            "description": desc,
-            "year": year,
-            "cached_at": datetime.now().isoformat(),
-        }, on_conflict="title,media_type").execute()
-    except Exception:
-        pass
+    # 3. Сохраняем (включая NULL)
+    if supabase is not None:
+        try:
+            supabase.table("media_cache").upsert({
+                "title": title,
+                "media_type": media_type,
+                "description": desc,
+                "year": year,
+                "cached_at": datetime.now().isoformat(),
+            }, on_conflict="title,media_type").execute()
+        except Exception:
+            pass
 
     return desc, year
 
 
 def clear_cache():
+    if supabase is None:
+        return False
     try:
         resp = supabase.table("media_cache").select("id").execute()
         ids = [r["id"] for r in resp.data]
@@ -666,26 +684,28 @@ def test_wikipedia_api():
 
 
 def test_supabase():
-    """Проверка чтения, записи и удаления в Supabase."""
+    if supabase is None:
+        # Покажем подробности, почему не подключились
+        url = get_secret("SUPABASE_URL")
+        key = get_secret("SUPABASE_KEY")
+        msg = (
+            f"❌ Supabase не подключён.\n"
+            f"URL длина: {len(url) if url else 0}, значение: {repr(url)}\n"
+            f"KEY длина: {len(key) if key else 0}, начало: {key[:12] if key else 'пусто'}"
+        )
+        return False, msg
     try:
-        # 1. Чтение
-        resp = supabase.table("ratings").select("id").limit(1).execute()
-
-        # 2. Проверка записи (upsert тестовой записи и удаление)
-        test_title = "__test_supabase_connection__"
-        test_media = "test"
-
+        supabase.table("ratings").select("id").limit(1).execute()
+        # Проверим запись
+        test_title = "__test__"
         supabase.table("ratings").upsert({
             "title": test_title,
-            "media_type": test_media,
+            "media_type": "test",
             "category": "not_watched",
             "rated_at": datetime.now().isoformat(),
         }, on_conflict="title,media_type").execute()
-
-        # 3. Удаление тестовой записи
-        supabase.table("ratings").delete().eq("title", test_title).eq("media_type", test_media).execute()
-
-        return True, "✅ Supabase полностью работает (чтение + запись + удаление)"
+        supabase.table("ratings").delete().eq("title", test_title).eq("media_type", "test").execute()
+        return True, "✅ Supabase работает (чтение + запись + удаление)"
     except Exception as e:
         return False, f"❌ Ошибка Supabase: {type(e).__name__}: {e}"
 
@@ -961,6 +981,27 @@ st.set_page_config(page_title="Что посмотреть", page_icon="🎬", l
 
 st.title("🎬 Что посмотреть")
 st.caption("Персональный советчик: оцени тайтлы и получи рекомендации от GigaChat.")
+
+# Диагностика секретов — всегда видно, что приходит
+with st.expander("🔍 Диагностика секретов", expanded=False):
+    url_val = get_secret("SUPABASE_URL")
+    key_val = get_secret("SUPABASE_KEY")
+    gigachat_val = get_secret("GIGACHAT_CREDENTIALS")
+    kp_val = get_secret("KINOPOISK_API_KEY")
+
+    st.write(f"**SUPABASE_URL** — длина: `{len(url_val) if url_val else 0}`")
+    st.write(f"Значение URL: `{url_val if url_val else 'ПУСТО'}`")
+    st.write(f"**SUPABASE_KEY** — начало: `{key_val[:12] if key_val else 'ПУСТО'}`")
+    st.write(f"**GIGACHAT_CREDENTIALS** — длина: `{len(gigachat_val) if gigachat_val else 0}`")
+    st.write(f"**KINOPOISK_API_KEY** — длина: `{len(kp_val) if kp_val else 0}`")
+
+    if not url_val or not key_val:
+        st.error(
+            "⚠️ URL или KEY пустые. Проверьте Secrets: каждая переменная "
+            "должна быть в ОДНОЙ строке, значение в двойных кавычках."
+        )
+    if url_val and ('\n' in str(url_val) or '\\n' in str(url_val)):
+        st.error("⚠️ В URL есть перенос строки. Secrets повреждены.")
 
 if not get_secret("KINOPOISK_API_KEY"):
     st.warning(
