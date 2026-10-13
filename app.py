@@ -212,6 +212,7 @@ def media_label(media_type):
 # Работа с Supabase
 # ─────────────────────────────────────────────────────────────
 def save_rating(title, media_type, category):
+    """Возвращает True при успехе, False при ошибке. Ошибку показывает в UI."""
     try:
         supabase.table("ratings").upsert({
             "title": title,
@@ -219,19 +220,22 @@ def save_rating(title, media_type, category):
             "category": category,
             "rated_at": datetime.now().isoformat(),
         }, on_conflict="title,media_type").execute()
+        return True
     except Exception as e:
-        st.error(f"Ошибка сохранения оценки: {e}")
+        st.error(f"❌ Ошибка сохранения в Supabase: {type(e).__name__}: {e}")
+        return False
 
 
 def delete_rating(title, media_type):
     try:
         supabase.table("ratings").delete().eq("title", title).eq("media_type", media_type).execute()
+        return True
     except Exception as e:
-        st.error(f"Ошибка удаления: {e}")
+        st.error(f"❌ Ошибка удаления: {type(e).__name__}: {e}")
+        return False
 
 
 def get_all_ratings():
-    """Возвращает список кортежей (title, media_type, category, rated_at)."""
     try:
         resp = supabase.table("ratings").select("title,media_type,category,rated_at").order(
             "rated_at", desc=True
@@ -242,7 +246,6 @@ def get_all_ratings():
 
 
 def get_rated_titles():
-    """Возвращает множество (title, media_type) — для быстрой проверки."""
     try:
         resp = supabase.table("ratings").select("title,media_type").execute()
         return {(r["title"], r["media_type"]) for r in resp.data}
@@ -252,17 +255,17 @@ def get_rated_titles():
 
 def reset_all_ratings():
     try:
-        # Сначала получаем все id
         resp = supabase.table("ratings").select("id").execute()
         ids = [r["id"] for r in resp.data]
         if ids:
             supabase.table("ratings").delete().in_("id", ids).execute()
+        return True
     except Exception as e:
-        st.error(f"Ошибка сброса: {e}")
+        st.error(f"❌ Ошибка сброса: {type(e).__name__}: {e}")
+        return False
 
 
 def is_cached(title, media_type):
-    """True если запись уже есть в media_cache (даже без описания)."""
     try:
         resp = supabase.table("media_cache").select("id").eq("title", title).eq(
             "media_type", media_type
@@ -579,7 +582,6 @@ def verify_title(title: str, media_type: str):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_description(title: str, media_type: str):
-    # 1. Проверяем кэш в Supabase
     try:
         resp = supabase.table("media_cache").select("description,year").eq(
             "title", title
@@ -590,10 +592,8 @@ def get_description(title: str, media_type: str):
     except Exception:
         pass
 
-    # 2. Верификация через Кинопоиск / Wikipedia
     desc, year = verify_title(title, media_type)
 
-    # 3. Сохраняем в Supabase (включая NULL — чтобы не пробовать снова)
     try:
         supabase.table("media_cache").upsert({
             "title": title,
@@ -615,8 +615,10 @@ def clear_cache():
         if ids:
             supabase.table("media_cache").delete().in_("id", ids).execute()
         get_description.clear()
+        return True
     except Exception as e:
-        st.error(f"Ошибка очистки кэша: {e}")
+        st.error(f"❌ Ошибка очистки кэша: {type(e).__name__}: {e}")
+        return False
 
 
 def test_kinopoisk_api():
@@ -664,11 +666,28 @@ def test_wikipedia_api():
 
 
 def test_supabase():
+    """Проверка чтения, записи и удаления в Supabase."""
     try:
+        # 1. Чтение
         resp = supabase.table("ratings").select("id").limit(1).execute()
-        return True, f"✅ Supabase работает. Записей в ratings: {len(resp.data)} (видна первая)"
+
+        # 2. Проверка записи (upsert тестовой записи и удаление)
+        test_title = "__test_supabase_connection__"
+        test_media = "test"
+
+        supabase.table("ratings").upsert({
+            "title": test_title,
+            "media_type": test_media,
+            "category": "not_watched",
+            "rated_at": datetime.now().isoformat(),
+        }, on_conflict="title,media_type").execute()
+
+        # 3. Удаление тестовой записи
+        supabase.table("ratings").delete().eq("title", test_title).eq("media_type", test_media).execute()
+
+        return True, "✅ Supabase полностью работает (чтение + запись + удаление)"
     except Exception as e:
-        return False, f"❌ Ошибка Supabase: {e}"
+        return False, f"❌ Ошибка Supabase: {type(e).__name__}: {e}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -880,8 +899,11 @@ def _render_buttons_only(title, media_type, key_prefix):
             key=f"{key_prefix}|{title}|{media_type}|{value}",
             use_container_width=True,
         ):
-            save_rating(title, media_type, value)
-            st.rerun()
+            if save_rating(title, media_type, value):
+                st.toast(f"✅ {title} — сохранено", icon="✔️")
+                st.rerun()
+            else:
+                st.stop()
 
 
 def render_rating_buttons(title, media_type, key_prefix):
@@ -1057,8 +1079,8 @@ with tab_plan:
                 "❌ Убрать из планов",
                 key=f"plan_remove|{title}|{media_type}",
             ):
-                delete_rating(title, media_type)
-                st.rerun()
+                if delete_rating(title, media_type):
+                    st.rerun()
             st.markdown("---")
 
 # ─── Вкладка «Мои оценки» ────────────────────────────────────
@@ -1177,18 +1199,18 @@ with tab_settings:
     st.markdown("### Оценки")
     st.write("Сброс всех оценок. Действие необратимо.")
     if st.button("🗑️ Сбросить все оценки"):
-        reset_all_ratings()
-        st.session_state.pop("ai_blocks", None)
-        st.session_state.pop("ai_raw", None)
-        st.session_state.pop("ai_log", None)
-        st.session_state.pop("rate_batch", None)
-        st.success("Все оценки удалены.")
-        st.rerun()
+        if reset_all_ratings():
+            st.session_state.pop("ai_blocks", None)
+            st.session_state.pop("ai_raw", None)
+            st.session_state.pop("ai_log", None)
+            st.session_state.pop("rate_batch", None)
+            st.success("Все оценки удалены.")
+            st.rerun()
 
     st.markdown("---")
     st.markdown("### Кэш описаний")
     st.write("Очистить кэш описаний.")
     if st.button("🧹 Очистить кэш описаний"):
-        clear_cache()
-        st.success("Кэш описаний очищен.")
-        st.rerun()
+        if clear_cache():
+            st.success("Кэш описаний очищен.")
+            st.rerun()
